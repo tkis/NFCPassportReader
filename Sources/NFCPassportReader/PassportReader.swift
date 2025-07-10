@@ -13,7 +13,7 @@ import OSLog
 import UIKit
 import CoreNFC
 
-@available(iOS 15, *)
+@available(iOS 13, *)
 public protocol PassportReaderTrackingDelegate: AnyObject {
     func nfcTagDetected()
     func readCardAccess(cardAccess: CardAccess)
@@ -25,7 +25,7 @@ public protocol PassportReaderTrackingDelegate: AnyObject {
     func bacFailed()
 }
 
-@available(iOS 15, *)
+@available(iOS 13, *)
 extension PassportReaderTrackingDelegate {
     func nfcTagDetected() { /* default implementation */ }
     func readCardAccess(cardAccess: CardAccess) { /* default implementation */ }
@@ -37,8 +37,8 @@ extension PassportReaderTrackingDelegate {
     func bacFailed() { /* default implementation */ }
 }
 
-@available(iOS 15, *)
-public class PassportReader : NSObject {
+@available(iOS 13, *)
+public final class PassportReader : NSObject, @unchecked Sendable {
     private typealias NFCCheckedContinuation = CheckedContinuation<NFCPassportModel, Error>
     private var nfcContinuation: NFCCheckedContinuation?
 
@@ -56,6 +56,7 @@ public class PassportReader : NSObject {
     
     // Extended mode is used for reading eMRTD's that support extended length APDUs
     private var useExtendedMode = false
+    private var skipParsingErrors = false
 
     private var bacHandler : BACHandler?
     private var caHandler : ChipAuthenticationHandler?
@@ -71,6 +72,8 @@ public class PassportReader : NSObject {
     // By default, Passive Authentication uses the new RFS5652 method to verify the SOD, but can be switched to use
     // the previous OpenSSL CMS verification if necessary
     public var passiveAuthenticationUsesOpenSSL : Bool = false
+
+    public var activeAuthenticationChallenge = { generateRandomUInt8Array(8) }
 
     public init( masterListURL: URL? = nil ) {
         super.init()
@@ -89,15 +92,21 @@ public class PassportReader : NSObject {
     public func overrideNFCDataAmountToRead( amount: Int ) {
         dataAmountToReadOverride = amount
     }
-    
-    public func readPassport( mrzKey : String, tags : [DataGroupId] = [], skipSecureElements : Bool = true, skipCA : Bool = false, skipPACE : Bool = false, useExtendedMode : Bool = false, customDisplayMessage : ((NFCViewDisplayMessage) -> String?)? = nil) async throws -> NFCPassportModel {
-        
+    public func readPassport( mrzKey : String,
+                              tags : [DataGroupId] = [],
+                              skipSecureElements : Bool = true,
+                              skipCA : Bool = false,
+                              skipPACE : Bool = false,
+                              useExtendedMode : Bool = false,
+                              skipParsingErrors : Bool = false,
+                              customDisplayMessage : (@Sendable (NFCViewDisplayMessage) -> String?)? = nil
+    ) async throws -> NFCPassportModel {
         self.passport = NFCPassportModel()
         self.mrzKey = mrzKey
         self.skipCA = skipCA
         self.skipPACE = skipPACE
         self.useExtendedMode = useExtendedMode
-        
+        self.skipParsingErrors = skipParsingErrors
         self.dataGroupsToRead.removeAll()
         self.dataGroupsToRead.append( contentsOf:tags)
         self.nfcViewDisplayMessageHandler = customDisplayMessage
@@ -134,7 +143,7 @@ public class PassportReader : NSObject {
     }
 }
 
-@available(iOS 15, *)
+@available(iOS 13, *)
 extension PassportReader : NFCTagReaderSessionDelegate {
     // MARK: - NFCTagReaderSessionDelegate
     public func tagReaderSessionDidBecomeActive(_ session: NFCTagReaderSession) {
@@ -252,7 +261,7 @@ extension PassportReader : NFCTagReaderSessionDelegate {
     }
 }
 
-@available(iOS 15, *)
+@available(iOS 13, *)
 extension PassportReader {
     
     func startReading(tagReader : TagReader) async throws -> NFCPassportModel {
@@ -323,7 +332,7 @@ extension PassportReader {
 
         Logger.passportReader.info( "Performing Active Authentication" )
 
-        let challenge = generateRandomUInt8Array(8)
+        let challenge = activeAuthenticationChallenge()
         Logger.passportReader.debug( "Generated Active Authentication challange - \(binToHexRep(challenge))")
         let response = try await tagReader.doInternalAuthentication(challenge: challenge, useExtendedMode: useExtendedMode)
         self.passport.verifyActiveAuthentication( challenge:challenge, signature:response.data )
@@ -410,7 +419,7 @@ extension PassportReader {
         repeat {
             do {
                 let response = try await tagReader.readDataGroup(dataGroup:dgId)
-                let dg = try DataGroupParser().parseDG(data: response)
+                let dg = try DataGroupParser().parseDG(data: response, skipParsingErrors: skipParsingErrors && dgId != .COM)
                 return dg
             } catch let error as NFCPassportReaderError {
                 Logger.passportReader.error( "TagError reading tag - \(error)" )
